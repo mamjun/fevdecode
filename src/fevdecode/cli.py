@@ -16,14 +16,13 @@ import time
 from datetime import datetime
 from typing import Iterable
 
-from .fdp import build_fdp, extract_fdp, parse_fdp
+from .fdp import extract_fdp, parse_fdp
 from .fdp_project import build_fdp_project_from_fev
 from .mpeg import clean_mpeg_padding
 from .parser import (
     build_event_bank_file_map,
     build_event_path_map,
     build_event_sample_map,
-    build_manifest,
     extract_fev_events,
     find_sound_pairs,
     parse_fev_event_map,
@@ -31,28 +30,6 @@ from .parser import (
     read_fev,
     read_fsb,
 )
-
-
-def _collect_entries(input_dir: str) -> list[tuple[str, bytes]]:
-    entries: list[tuple[str, bytes]] = []
-    for fev_path, fsb_path in find_sound_pairs(input_dir):
-        fev_data, _ = read_fev(fev_path)
-        entries.append((os.path.basename(fev_path), fev_data))
-        if fsb_path:
-            fsb_data, _ = read_fsb(fsb_path)
-            entries.append((os.path.basename(fsb_path), fsb_data))
-    if not entries:
-        raise FileNotFoundError("No .fev files found in input directory")
-    manifest = build_manifest(input_dir)
-    manifest_bytes = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
-    entries.append(("manifest.json", manifest_bytes))
-    return entries
-
-
-def cmd_build(args: argparse.Namespace) -> int:
-    entries = _collect_entries(args.input)
-    build_fdp(entries, args.output)
-    return 0
 
 
 def cmd_extract(args: argparse.Namespace) -> int:
@@ -64,12 +41,6 @@ def cmd_list(args: argparse.Namespace) -> int:
     entries = parse_fdp(args.input)
     for entry in entries:
         print(f"{entry.name}\t{entry.size}")
-    return 0
-
-
-def cmd_inspect(args: argparse.Namespace) -> int:
-    manifest = build_manifest(args.input)
-    print(json.dumps(manifest, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -155,20 +126,6 @@ def _find_local_ffprobe() -> str | None:
         os.path.join(repo_root, "libs", "ffprobe.exe"),
         os.path.join(repo_root, "libs", "ffmpeg", "ffprobe.exe"),
         os.path.join(repo_root, "libs", "ffmpeg", "bin", "ffprobe.exe"),
-    ]
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate
-    return None
-
-
-def _find_fmodex_exe() -> str | None:
-    repo_root = _get_repo_root()
-    candidates = [
-        os.path.join(repo_root, "libs", "fmodex-lw", "fmodext.exe"),
-        os.path.join(repo_root, "libs", "fmodex-lw", "fmodex-lw.exe"),
-        os.path.join(repo_root, "libs", "fmodext.exe"),
-        os.path.join(repo_root, "libs", "fmodex-lw.exe"),
     ]
     for candidate in candidates:
         if os.path.isfile(candidate):
@@ -282,94 +239,6 @@ def _decode_to_wav(data: bytes, ext: str) -> bytes:
     return out.getvalue()
 
 
-def _chunk_indices(indices: Iterable[int], chunk_size: int) -> list[list[int]]:
-    size = max(1, int(chunk_size))
-    batches: list[list[int]] = []
-    current: list[int] = []
-    for value in indices:
-        current.append(int(value))
-        if len(current) >= size:
-            batches.append(current)
-            current = []
-    if current:
-        batches.append(current)
-    return batches
-
-
-def _decode_with_fmodex_batch(
-    fsb_path: str,
-    sample_indices: Iterable[int],
-    fmodex_path: str | None = None,
-) -> dict[int, bytes]:
-    indices = [int(value) for value in sample_indices]
-    if not indices:
-        return {}
-    exe_path = fmodex_path or _find_fmodex_exe()
-    if not exe_path:
-        raise RuntimeError("fmodex executable not found. Place fmodext.exe under libs/fmodex-lw/")
-    with tempfile.TemporaryDirectory() as tmpdir:
-        existing = {name for name in os.listdir(tmpdir) if name.lower().endswith(".wav")}
-        index_arg = ",".join(str(idx) for idx in indices)
-        command = [exe_path, fsb_path, index_arg, tmpdir]
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode != 0:
-            message = result.stderr.decode("utf-8", errors="replace").strip()
-            if not message:
-                message = f"fmodex-lw exited with code {result.returncode}"
-            raise RuntimeError(message)
-
-        stdout_text = result.stdout.decode("utf-8", errors="replace")
-        reported: list[str] = []
-        for line in stdout_text.splitlines():
-            if "PATH:" in line:
-                _, path = line.split("PATH:", 1)
-                path = path.strip()
-                if path:
-                    reported.append(os.path.basename(path))
-
-        produced = [
-            name for name in os.listdir(tmpdir)
-            if name.lower().endswith(".wav") and name not in existing
-        ]
-
-        if reported and len(reported) == len(indices):
-            ordered = reported
-        else:
-            produced.sort(key=lambda name: os.path.getmtime(os.path.join(tmpdir, name)))
-            ordered = produced
-
-        if len(ordered) != len(indices):
-            raise RuntimeError(
-                f"fmodex-lw produced {len(ordered)} wav files for {len(indices)} indices"
-            )
-
-        output: dict[int, bytes] = {}
-        for idx, filename in zip(indices, ordered):
-            output_path = os.path.join(tmpdir, filename)
-            if not os.path.exists(output_path):
-                raise RuntimeError(f"fmodex-lw output missing: {filename}")
-            with open(output_path, "rb") as fp:
-                output[idx] = fp.read()
-        return output
-
-
-def _decode_with_fmodex(fsb_path: str, sample_index: int, fmodex_path: str | None = None) -> bytes:
-    output = _decode_with_fmodex_batch(fsb_path, [sample_index], fmodex_path)
-    if sample_index not in output:
-        raise RuntimeError(f"fmodex-lw missing output for index {sample_index}")
-    return output[sample_index]
-
-
-def _decode_with_fmodex_task(args: tuple[str, int, str | None]) -> bytes:
-    fsb_path, sample_index, fmodex_path = args
-    return _decode_with_fmodex(fsb_path, sample_index, fmodex_path)
-
-
-def _decode_with_fmodex_batch_task(args: tuple[str, list[int], str | None]) -> dict[int, bytes]:
-    fsb_path, sample_indices, fmodex_path = args
-    return _decode_with_fmodex_batch(fsb_path, sample_indices, fmodex_path)
-
-
 def cmd_extract_fsb(args: argparse.Namespace) -> int:
     fsb = _load_fsb5_library(args.input)
     ext = _fsb5_extension(fsb)
@@ -397,71 +266,29 @@ def cmd_extract_fsb_audio(args: argparse.Namespace) -> int:
         os.chdir(libs_path)
     fsb = _load_fsb5_library(input_path)
     is_vorbis = _is_vorbis_fsb(fsb)
-    if is_vorbis:
-        args.use_fmodex = False
-    ext = "ogg" if is_vorbis else ("wav" if args.use_fmodex else _fsb5_extension(fsb))
-    if ext.lower() == "mp3" and args.use_fmodex:
-        logger.info("MP3 detected; switching decoder to ffmpeg")
-        args.use_fmodex = False
-        ext = "mp3"
+    ext = "ogg" if is_vorbis else _fsb5_extension(fsb)
     written = 0
     failed = 0
     missing_crc: list[int] = []
     try:
-        jobs = max(1, int(getattr(args, "jobs", 1) or 1))
-        if args.use_fmodex and jobs > 1:
-            indices = list(range(len(fsb.samples)))
-            batches = _chunk_indices(indices, 50)
-            tasks = [(input_path, batch, args.fmodex) for batch in batches]
-            with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as executor:
-                future_map = {
-                    executor.submit(_decode_with_fmodex_batch_task, task): task[1] for task in tasks
-                }
-                for future in concurrent.futures.as_completed(future_map):
-                    batch_indices = future_map[future]
-                    try:
-                        batch_data = future.result()
-                    except Exception as exc:
-                        failed += len(batch_indices)
-                        match = re.search(r"crc32=(\d+)", str(exc))
-                        if match:
-                            missing_crc.append(int(match.group(1)))
-                        continue
-                    for idx in batch_indices:
-                        sample = fsb.samples[idx]
-                        data = batch_data.get(idx)
-                        if data is None:
-                            failed += 1
-                            continue
-                        _write_sample(output_dir, sample.name, ext, data)
-                        written += 1
-        else:
-            for idx, sample in enumerate(fsb.samples):
-                try:
-                    if args.use_fmodex:
-                        data = _decode_with_fmodex(input_path, idx, args.fmodex)
-                    else:
-                        data = fsb.rebuild_sample(sample)
-                except Exception as exc:
-                    if not args.use_fmodex:
-                        try:
-                            data = _decode_with_fmodex(input_path, idx, args.fmodex)
-                        except Exception:
-                            failed += 1
-                            match = re.search(r"crc32=(\d+)", str(exc))
-                            if match:
-                                missing_crc.append(int(match.group(1)))
-                            continue
-                    else:
-                        failed += 1
-                        match = re.search(r"crc32=(\d+)", str(exc))
-                        if match:
-                            missing_crc.append(int(match.group(1)))
-                        continue
+        for sample in fsb.samples:
+            try:
+                data = fsb.rebuild_sample(sample)
                 if ext == "mp3" and not args.no_fix_mp3:
                     data = clean_mpeg_padding(data)
-                _write_sample(output_dir, sample.name, ext, data)
-                written += 1
+                if not is_vorbis:
+                    data = _decode_to_wav(data, ext)
+                    output_ext = "wav"
+                else:
+                    output_ext = ext
+            except Exception as exc:
+                failed += 1
+                match = re.search(r"crc32=(\d+)", str(exc))
+                if match:
+                    missing_crc.append(int(match.group(1)))
+                continue
+            _write_sample(output_dir, sample.name, output_ext, data)
+            written += 1
     finally:
         os.chdir(original_cwd)
     if missing_crc:
@@ -609,8 +436,6 @@ def cmd_event_map(args: argparse.Namespace) -> int:
 def cmd_event_bank_files(args: argparse.Namespace) -> int:
     logger = _get_logger("event_bank_files")
     started = time.time()
-    if not getattr(args, "use_fmodex", False) and not getattr(args, "no_fmodex", False):
-        args.use_fmodex = True
     fev_path = os.path.abspath(args.fev)
     fsb_map = getattr(args, "fsb_map", None)
     if fsb_map:
@@ -681,23 +506,11 @@ def cmd_event_bank_files(args: argparse.Namespace) -> int:
         fsb = _load_fsb5_library(bank_fsb_path)
         logger.info("Parsed FSB samples: %s (%s)", len(fsb.samples), bank_fsb_path)
         is_vorbis = _is_vorbis_fsb(fsb)
-        ext = _fsb5_extension(fsb)
-        use_fmodex = args.use_fmodex
-        if is_vorbis:
-            use_fmodex = False
-            ext = "ogg"
-        elif ext.lower() == "mp3":
-            if use_fmodex:
-                logger.info("MP3 detected; switching decoder to ffmpeg")
-            use_fmodex = False
-            ext = "mp3"
-        else:
-            ext = "wav" if use_fmodex else ext
-
+        ext = "ogg" if is_vorbis else _fsb5_extension(fsb)
         if is_vorbis:
             logger.info("Decode mode: python-fsb5 (ogg)")
         else:
-            logger.info("Decode mode: %s (jobs=%s)", "fmodex" if use_fmodex else "ffmpeg", jobs)
+            logger.info("Decode mode: ffmpeg (jobs=%s)", jobs)
 
         def _decode_entry(file_index: int) -> bytes:
             sample = fsb.samples[file_index]
@@ -707,168 +520,74 @@ def cmd_event_bank_files(args: argparse.Namespace) -> int:
             if is_vorbis:
                 return data
             return _decode_to_wav(data, ext)
+        tasks: list[tuple[dict, str, int]] = []
+        for event in mapping.get("events", []):
+            event_path = event.get("event", "")
+            event_dir = os.path.join(audio_root, _event_to_dir(event_path))
+            logger.info("Event: %s -> %s", event_path, event_dir)
+            files = event.get("files", [])
+            for entry in files:
+                if bank_name != "*" and entry.get("bank_name") != bank_name:
+                    continue
+                file_index = entry.get("file_index")
+                if not isinstance(file_index, int) or not (0 <= file_index < len(fsb.samples)):
+                    entry["audio_status"] = "missing_sample"
+                    missing_samples += 1
+                    continue
+                tasks.append((entry, event_dir, file_index))
 
-        if use_fmodex and jobs > 1:
-            index_entries: dict[int, list[tuple[dict, str]]] = {}
-            for event in mapping.get("events", []):
-                event_path = event.get("event", "")
-                event_dir = os.path.join(audio_root, _event_to_dir(event_path))
-                logger.info("Event: %s -> %s", event_path, event_dir)
-                files = event.get("files", [])
-                for entry in files:
-                    if bank_name != "*" and entry.get("bank_name") != bank_name:
-                        continue
-                    file_index = entry.get("file_index")
-                    if not isinstance(file_index, int) or not (0 <= file_index < len(fsb.samples)):
-                        entry["audio_status"] = "missing_sample"
-                        missing_samples += 1
-                        continue
-                    index_entries.setdefault(file_index, []).append((entry, event_dir))
+        def _write_audio(entry: dict, event_dir: str, file_index: int, wav_data: bytes) -> None:
+            base_name = entry.get("sample_name") or os.path.splitext(os.path.basename(entry.get("path", "")))[0]
+            if not base_name:
+                base_name = f"file_{file_index}"
+            safe_name = _sanitize_path_segment(base_name)
+            output_ext = "ogg" if is_vorbis else "wav"
+            output_file = os.path.join(event_dir, f"{safe_name}.{output_ext}")
+            os.makedirs(os.path.dirname(output_file), exist_ok=True)
+            with open(output_file, "wb") as out:
+                out.write(wav_data)
+            entry["audio_status"] = "written"
+            entry["audio_output"] = output_file
+            entry["audio_decoder"] = "python-fsb5" if is_vorbis else "ffmpeg"
+            logger.info("Wrote audio: %s", output_file)
+            logger.info("Audio decode: %s -> %s", entry["audio_decoder"], output_file)
 
-            batches = _chunk_indices(index_entries.keys(), 50)
-            tasks = [(bank_fsb_path, batch, args.fmodex) for batch in batches]
-            with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as executor:
+        if jobs > 1:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
                 future_map = {
-                    executor.submit(_decode_with_fmodex_batch_task, task): task[1] for task in tasks
+                    executor.submit(_decode_entry, file_index): (entry, event_dir, file_index)
+                    for entry, event_dir, file_index in tasks
                 }
-
                 for future in concurrent.futures.as_completed(future_map):
-                    batch_indices = future_map[future]
+                    entry, event_dir, file_index = future_map[future]
                     try:
-                        batch_data = future.result()
+                        wav_data = future.result()
                     except Exception as exc:
-                        failed += len(batch_indices)
-                        for idx in batch_indices:
-                            for entry, _ in index_entries.get(idx, []):
-                                entry["audio_status"] = "error"
-                                entry["audio_error"] = str(exc)
-                        logger.warning("Decode failed: indices=%s error=%s", batch_indices, exc)
+                        failed += 1
+                        match = re.search(r"crc32=(\d+)", str(exc))
+                        if match:
+                            missing_crc.append(int(match.group(1)))
+                        entry["audio_status"] = "error"
+                        entry["audio_error"] = str(exc)
+                        logger.warning("Decode failed: index=%s error=%s", file_index, exc)
                         continue
-
-                    for idx in batch_indices:
-                        wav_data = batch_data.get(idx)
-                        if wav_data is None:
-                            failed += 1
-                            for entry, _ in index_entries.get(idx, []):
-                                entry["audio_status"] = "error"
-                                entry["audio_error"] = "missing_output"
-                            logger.warning("Decode missing output: index=%s", idx)
-                            continue
-                        for entry, event_dir in index_entries.get(idx, []):
-                            base_name = entry.get("sample_name") or os.path.splitext(os.path.basename(entry.get("path", "")))[0]
-                            if not base_name:
-                                base_name = f"file_{idx}"
-                            safe_name = _sanitize_path_segment(base_name)
-                            output_file = os.path.join(event_dir, f"{safe_name}.wav")
-                            os.makedirs(os.path.dirname(output_file), exist_ok=True)
-                            with open(output_file, "wb") as out:
-                                out.write(wav_data)
-                            entry["audio_status"] = "written"
-                            entry["audio_output"] = output_file
-                            entry["audio_decoder"] = "fmodex"
-                            logger.info("Wrote audio: %s", output_file)
-                            logger.info("Audio decode: fmodex -> %s", output_file)
-                            written += 1
-        else:
-            tasks: list[tuple[dict, str, int]] = []
-            for event in mapping.get("events", []):
-                event_path = event.get("event", "")
-                event_dir = os.path.join(audio_root, _event_to_dir(event_path))
-                logger.info("Event: %s -> %s", event_path, event_dir)
-                files = event.get("files", [])
-                for entry in files:
-                    if bank_name != "*" and entry.get("bank_name") != bank_name:
-                        continue
-                    file_index = entry.get("file_index")
-                    if not isinstance(file_index, int) or not (0 <= file_index < len(fsb.samples)):
-                        entry["audio_status"] = "missing_sample"
-                        missing_samples += 1
-                        continue
-                    tasks.append((entry, event_dir, file_index))
-
-            if not use_fmodex and jobs > 1:
-                with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as executor:
-                    future_map = {
-                        executor.submit(_decode_entry, file_index): (entry, event_dir, file_index)
-                        for entry, event_dir, file_index in tasks
-                    }
-                    for future in concurrent.futures.as_completed(future_map):
-                        entry, event_dir, file_index = future_map[future]
-                        try:
-                            wav_data = future.result()
-                            decoder = "python-fsb5" if is_vorbis else "ffmpeg"
-                        except Exception as exc:
-                            try:
-                                wav_data = _decode_with_fmodex(bank_fsb_path, file_index, args.fmodex)
-                                decoder = "fmodex"
-                            except Exception:
-                                failed += 1
-                                match = re.search(r"crc32=(\d+)", str(exc))
-                                if match:
-                                    missing_crc.append(int(match.group(1)))
-                                entry["audio_status"] = "error"
-                                entry["audio_error"] = str(exc)
-                                logger.warning("Decode failed: index=%s error=%s", file_index, exc)
-                                continue
-                        base_name = entry.get("sample_name") or os.path.splitext(os.path.basename(entry.get("path", "")))[0]
-                        if not base_name:
-                            base_name = f"file_{file_index}"
-                        safe_name = _sanitize_path_segment(base_name)
-                        output_file = os.path.join(event_dir, f"{safe_name}.{ext if is_vorbis else 'wav'}")
-                        os.makedirs(os.path.dirname(output_file), exist_ok=True)
-                        with open(output_file, "wb") as out:
-                            out.write(wav_data)
-                        entry["audio_status"] = "written"
-                        entry["audio_output"] = output_file
-                        entry["audio_decoder"] = decoder
-                        logger.info("Wrote audio: %s", output_file)
-                        logger.info("Audio decode: %s -> %s", decoder, output_file)
-                        written += 1
-            else:
-                for entry, event_dir, file_index in tasks:
-                    try:
-                        if use_fmodex:
-                            wav_data = _decode_with_fmodex(bank_fsb_path, file_index, args.fmodex)
-                            decoder = "fmodex"
-                        else:
-                            wav_data = _decode_entry(file_index)
-                            decoder = "python-fsb5" if is_vorbis else "ffmpeg"
-                    except Exception as exc:
-                        if not use_fmodex:
-                            try:
-                                wav_data = _decode_with_fmodex(bank_fsb_path, file_index, args.fmodex)
-                                decoder = "fmodex"
-                            except Exception:
-                                failed += 1
-                                match = re.search(r"crc32=(\d+)", str(exc))
-                                if match:
-                                    missing_crc.append(int(match.group(1)))
-                                entry["audio_status"] = "error"
-                                entry["audio_error"] = str(exc)
-                                logger.warning("Decode failed: index=%s error=%s", file_index, exc)
-                                continue
-                        else:
-                            failed += 1
-                            match = re.search(r"crc32=(\d+)", str(exc))
-                            if match:
-                                missing_crc.append(int(match.group(1)))
-                            entry["audio_status"] = "error"
-                            entry["audio_error"] = str(exc)
-                            continue
-                    base_name = entry.get("sample_name") or os.path.splitext(os.path.basename(entry.get("path", "")))[0]
-                    if not base_name:
-                        base_name = f"file_{file_index}"
-                    safe_name = _sanitize_path_segment(base_name)
-                    output_file = os.path.join(event_dir, f"{safe_name}.{ext if is_vorbis else 'wav'}")
-                    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-                    with open(output_file, "wb") as out:
-                        out.write(wav_data)
-                    entry["audio_status"] = "written"
-                    entry["audio_output"] = output_file
-                    entry["audio_decoder"] = decoder
-                    logger.info("Wrote audio: %s", output_file)
-                    logger.info("Audio decode: %s -> %s", decoder, output_file)
+                    _write_audio(entry, event_dir, file_index, wav_data)
                     written += 1
+        else:
+            for entry, event_dir, file_index in tasks:
+                try:
+                    wav_data = _decode_entry(file_index)
+                except Exception as exc:
+                    failed += 1
+                    match = re.search(r"crc32=(\d+)", str(exc))
+                    if match:
+                        missing_crc.append(int(match.group(1)))
+                    entry["audio_status"] = "error"
+                    entry["audio_error"] = str(exc)
+                    logger.warning("Decode failed: index=%s error=%s", file_index, exc)
+                    continue
+                _write_audio(entry, event_dir, file_index, wav_data)
+                written += 1
 
     os.chdir(original_cwd)
 
@@ -911,8 +630,6 @@ def cmd_gen_fdp(args: argparse.Namespace) -> int:
 def cmd_gen_all(args: argparse.Namespace) -> int:
     logger = _get_logger("gen_all")
     started = time.time()
-    if not getattr(args, "use_fmodex", False) and not getattr(args, "no_fmodex", False):
-        args.use_fmodex = True
     if not args.name and not args.fev:
         raise ValueError("Provide --name or --fev")
     if args.name and args.fev:
@@ -948,8 +665,6 @@ def cmd_gen_all(args: argparse.Namespace) -> int:
         output=args.output,
         audio_root=args.audio_root,
         no_fix_mp3=args.no_fix_mp3,
-        use_fmodex=args.use_fmodex,
-        fmodex=args.fmodex,
         jobs=args.jobs,
         output_dir=args.output_dir,
     )
@@ -973,11 +688,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="fevdecode")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    build_cmd = sub.add_parser("build", help="build fdp from sound directory")
-    build_cmd.add_argument("--input", required=True, help="input directory containing .fev/.fsb")
-    build_cmd.add_argument("--output", required=True, help="output .fdp file")
-    build_cmd.set_defaults(func=cmd_build)
-
     extract_cmd = sub.add_parser("extract", help="extract fdp to directory")
     extract_cmd.add_argument("--input", required=True, help="input .fdp file")
     extract_cmd.add_argument("--output", required=True, help="output directory")
@@ -986,10 +696,6 @@ def build_parser() -> argparse.ArgumentParser:
     list_cmd = sub.add_parser("list", help="list entries in fdp")
     list_cmd.add_argument("--input", required=True, help="input .fdp file")
     list_cmd.set_defaults(func=cmd_list)
-
-    inspect_cmd = sub.add_parser("inspect", help="inspect .fev/.fsb in directory")
-    inspect_cmd.add_argument("--input", required=True, help="input directory containing .fev/.fsb")
-    inspect_cmd.set_defaults(func=cmd_inspect)
 
     extract_fsb_cmd = sub.add_parser("extract-fsb", help="extract raw samples from .fsb")
     extract_fsb_cmd.add_argument("--input", required=True, help="input .fsb file")
@@ -1000,9 +706,6 @@ def build_parser() -> argparse.ArgumentParser:
     extract_audio_cmd.add_argument("--input", required=True, help="input .fsb file")
     extract_audio_cmd.add_argument("--output", required=True, help="output directory")
     extract_audio_cmd.add_argument("--no-fix-mp3", action="store_true", help="do not remove mp3 inter-frame padding")
-    extract_audio_cmd.add_argument("--use-fmodex", action="store_true", help="decode with fmodex-lw.exe and export wav")
-    extract_audio_cmd.add_argument("--fmodex", required=False, help="path to fmodex-lw.exe (optional)")
-    extract_audio_cmd.add_argument("--jobs", type=int, default=16, help="number of worker processes for fmodex decoding")
     extract_audio_cmd.set_defaults(func=cmd_extract_fsb_audio)
 
     events_cmd = sub.add_parser("extract-events", help="extract audio by FEV event paths")
@@ -1025,10 +728,7 @@ def build_parser() -> argparse.ArgumentParser:
     bank_files_cmd.add_argument("--audio-root", required=False, help="audio subdirectory name (always placed under build/{fev_name})")
     bank_files_cmd.add_argument("--output-dir", required=False, help="output base directory (default: build; output is {base}/{fev_name})")
     bank_files_cmd.add_argument("--no-fix-mp3", action="store_true", help="do not remove mp3 inter-frame padding")
-    bank_files_cmd.add_argument("--use-fmodex", action="store_true", help="decode with fmodex-lw.exe and export wav")
-    bank_files_cmd.add_argument("--no-fmodex", action="store_true", help="disable fmodex and use ffmpeg")
-    bank_files_cmd.add_argument("--fmodex", required=False, help="path to fmodex-lw.exe (optional)")
-    bank_files_cmd.add_argument("--jobs", type=int, default=16, help="number of worker processes for fmodex decoding")
+    bank_files_cmd.add_argument("--jobs", type=int, default=16, help="number of worker threads for ffmpeg decoding")
     bank_files_cmd.set_defaults(func=cmd_event_bank_files)
 
     gen_fdp_cmd = sub.add_parser("gen-fdp", help="generate FMOD .fdp project from .fev")
@@ -1053,10 +753,7 @@ def build_parser() -> argparse.ArgumentParser:
     gen_all_cmd.add_argument("--output", required=False, help="event_bank_files.json output name (placed under build/{fev_name})")
     gen_all_cmd.add_argument("--audio-root", required=False, help="audio subdirectory name (placed under build/{fev_name})")
     gen_all_cmd.add_argument("--no-fix-mp3", action="store_true", help="do not remove mp3 inter-frame padding")
-    gen_all_cmd.add_argument("--use-fmodex", action="store_true", help="decode with fmodex-lw.exe and export wav")
-    gen_all_cmd.add_argument("--no-fmodex", action="store_true", help="disable fmodex and use ffmpeg")
-    gen_all_cmd.add_argument("--fmodex", required=False, help="path to fmodex-lw.exe (optional)")
-    gen_all_cmd.add_argument("--jobs", type=int, default=16, help="number of worker processes for fmodex decoding")
+    gen_all_cmd.add_argument("--jobs", type=int, default=16, help="number of worker threads for ffmpeg decoding")
     gen_all_cmd.add_argument(
         "--template",
         default=os.path.join(os.path.dirname(__file__), "..", "..", "temp", "basic.fdp"),

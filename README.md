@@ -1,20 +1,9 @@
 # fevdecode
 
-一个轻量级的 Python 项目骨架，用于从 `sound/` 目录读取 `.fev` 与 `.fsb` 文件，并打包为自定义的 `.fdp` 文件。当前实现提供稳定的读写容器格式（`FDP0`），方便后续替换为真实的 FEV/FSP/FDP 解析逻辑。
+一个轻量级的 Python 项目骨架，用于从 `sound/` 目录读取 `.fev` 与 `.fsb` 文件，并自动生成FMOD的 `.fdp` 文件。
 
 ## 快速开始
-
-```powershell
-python -m fevdecode build --input sound --output build\sora.fdp
-```
-
-查看解析摘要：
-
-```powershell
-python -m fevdecode inspect --input sound
-```
-
-`inspect` 现在会在 FEV 中解析 `STRR` 字符串表，并在清单里给出字符串数量与样例，同时解析 `PROJ` 子块的预览与字符串。
+第一步：下载 ffmpeg 并解压到 `libs/ffmpeg` 目录下。
 
 从 FSB 提取样本：
 
@@ -22,49 +11,18 @@ python -m fevdecode inspect --input sound
 python -m fevdecode extract-fsb --input sound\sora.fsb --output build\fsb_samples
 ```
 
-从 FSB 提取可播放音频（内置 FSB5 解析；Vorbis 需要头部表）：
+从 FSB 提取可播放音频（非 Vorbis 使用 ffmpeg 转 WAV；Vorbis 输出 OGG，需要头部表）：
 
 ```powershell
 pip install -r requirements.txt
 python -m fevdecode extract-fsb-audio --input sound\sora.fsb --output build\fsb_audio
-
-如需使用 `fmodex-lw.exe` 直接解码为 WAV（建议放置于 `libs/fmodex-lw/`）：
-
-```powershell
-python -m fevdecode extract-fsb-audio --use-fmodex --input sound\sora.fsb --output build\fsb_audio_wav
 ```
 
-可以指定并行进程数（仅对 fmodex 解码生效，默认 16）：
-
-```powershell
-python -m fevdecode extract-fsb-audio --use-fmodex --jobs 4 --input sound\sora.fsb --output build\fsb_audio_wav
-```
-```
-
-按事件层级生成 `event_bank_files.json` 并导出 WAV（依赖 `pydub` + `ffmpeg`）：
+按事件层级生成 `event_bank_files.json` 并导出 WAV（依赖 `ffmpeg`，`pydub` 仅作兜底）：
 
 ```powershell
 pip install -r requirements.txt
 python -m fevdecode event-bank-files --fev sound\sora.fev --fsb sound\sora.fsb
-
-使用 `fmodex-lw.exe` 解码 WAV：
-
-```powershell
-python -m fevdecode event-bank-files --use-fmodex --fev sound\sora.fev --fsb sound\sora.fsb
-```
-
-并行解码示例（默认优先 fmodex）：
-
-```powershell
-python -m fevdecode event-bank-files --jobs 32 --fev sound\sora.fev --fsb sound\sora.fsb
-```
-```
-
-禁用 fmodex，使用 ffmpeg：
-
-```powershell
-python -m fevdecode event-bank-files --no-fmodex --jobs 32 --fev sound\sora.fev --fsb sound\sora.fsb
-```
 ```
 
 默认输出到 `build/{fev_name}/`，例如 `build/sora/`。`--output` 与 `--audio-root` 只接受文件名/子目录名，仍会放在该目录下。
@@ -74,7 +32,7 @@ python -m fevdecode event-bank-files --no-fmodex --jobs 32 --fev sound\sora.fev 
 默认输出目录为 `build/{fev_name}/`，与 FEV 解析结果目录保持一致。
 可自定义模板与输出目录（`--output-dir` 为输出根目录，实际输出到 `{output-dir}/{fev_name}/`）：
 
-> 说明：Vorbis 样本会通过内置 Ogg 重建后使用 `ffmpeg` 直接解码（无需 `libvorbis`），并会优先读取项目内的 `libs/ffmpeg.exe`、`libs/ffmpeg/ffmpeg.exe` 或 `libs/ffmpeg/bin/ffmpeg.exe`；若不存在则使用系统 PATH。`pydub` 作为兜底路径时可能需要 `ffprobe`。
+> 说明：非 Vorbis 样本会通过内置 Ogg 重建后使用 `ffmpeg` 直接解码（无需 `libvorbis`），并会优先读取项目内的 `libs/ffmpeg.exe`、`libs/ffmpeg/ffmpeg.exe` 或 `libs/ffmpeg/bin/ffmpeg.exe`；若不存在则使用系统 PATH。`pydub` 作为兜底路径时可能需要 `ffprobe`。
 
 如果导出的 MP3 无法播放，可尝试默认的去填充逻辑；也可以禁用：
 
