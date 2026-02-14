@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+src/fevdecode/__init__.py
+src/fevdecode/__main__.py
+src/fevdecode/cli.py
+src/fevdecode/fdp.py
+src/fevdecode/mpeg.py
+src/fevdecode/parser.py
+src/fevdecode.egg-info/PKG-INFO
+src/fevdecode.egg-info/SOURCES.txt
+src/fevdecode.egg-info/dependency_links.txt
+src/fevdecode.egg-info/entry_points.txt
+src/fevdecode.egg-info/top_level.txt

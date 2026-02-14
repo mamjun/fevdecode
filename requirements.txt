@@ -1,0 +1,4 @@
+pydub
+audioop-lts
+python-fsb5
+lxml

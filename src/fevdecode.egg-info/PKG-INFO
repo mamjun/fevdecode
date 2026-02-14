@@ -1,0 +1,68 @@
+Metadata-Version: 2.4
+Name: fevdecode
+Version: 0.1.0
+Summary: Skeleton project for parsing FEV/FSB and rebuilding FDP
+Author: Your Name
+License: MIT
+Keywords: fev,fsb,fdp
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+
+# fevdecode
+
+一个轻量级的 Python 项目骨架，用于从 `sound/` 目录读取 `.fev` 与 `.fsb` 文件，并打包为自定义的 `.fdp` 文件。当前实现提供稳定的读写容器格式（`FDP0`），方便后续替换为真实的 FEV/FSP/FDP 解析逻辑。
+
+## 快速开始
+
+```powershell
+python -m fevdecode build --input sound --output build\sora.fdp
+```
+
+查看解析摘要：
+
+```powershell
+python -m fevdecode inspect --input sound
+```
+
+`inspect` 现在会在 FEV 中解析 `STRR` 字符串表，并在清单里给出字符串数量与样例，同时解析 `PROJ` 子块的预览与字符串。
+
+从 FSB 提取样本：
+
+```powershell
+python -m fevdecode extract-fsb --input sound\sora.fsb --output build\fsb_samples
+```
+
+从 FSB 提取可播放音频（依赖 `fsb5`）：
+
+```powershell
+pip install -r requirements.txt
+python -m fevdecode extract-fsb-audio --input sound\sora.fsb --output build\fsb_audio
+```
+
+如果导出的 MP3 无法播放，可尝试默认的去填充逻辑；也可以禁用：
+
+```powershell
+python -m fevdecode extract-fsb-audio --no-fix-mp3 --input sound\sora.fsb --output build\fsb_audio_raw
+```
+
+按 FEV 事件路径解包音频并生成映射：
+
+```powershell
+python -m fevdecode extract-events --fev sound\sora.fev --output build
+```
+
+`extract-events` 会自动从 FEV 的字符串表中提取所有事件（含 `__simpleevent_sounddef__` 与推断路径），生成完整映射。
+
+如果是 Vorbis 样本且缺少头部信息，会跳过并生成 `missing_vorbis_headers.json`，用于后续补全表。
+
+解包：
+
+```powershell
+python -m fevdecode extract --input build\sora.fdp --output build\extract
+```
+
+## 说明
+
+- 已接入基础真实格式解析（`FEV` 为 RIFF，`FSB` 为 FSB5 头部结构）。
+- 构建时会在 `fdp` 内加入 `manifest.json` 解析摘要。
+- `fdp` 采用自定义容器格式，便于逐步替换为真实格式。

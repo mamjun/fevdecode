@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fevdecode"
+version = "0.1.0"
+description = "Skeleton project for parsing FEV/FSB and rebuilding FDP"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Your Name" }]
+keywords = ["fev", "fsb", "fdp"]
+dependencies = ["python-fsb5", "lxml"]
+
+[project.scripts]
+fevdecode = "fevdecode.cli:main"
