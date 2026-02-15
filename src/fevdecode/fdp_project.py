@@ -10,7 +10,7 @@ try:
 except Exception:  # pragma: no cover - fallback when lxml not installed
     import xml.etree.ElementTree as ET
 
-from .parser import parse_fev_event_map
+from .parser import parse_fdp_event_effects, parse_fev_event_map
 
 
 def _indent(elem: ET.Element, level: int = 0) -> None:
@@ -229,6 +229,18 @@ def _append_text(parent: ET.Element, tag: str, text: str) -> ET.Element:
     return child
 
 
+def _apply_event_properties(event: ET.Element, properties: dict[str, str] | None) -> None:
+    if not properties:
+        return
+    for key, value in properties.items():
+        if value is None:
+            continue
+        node = event.find(key)
+        if node is None:
+            node = ET.SubElement(event, key)
+        node.text = value
+
+
 def _build_simpleevent(
     event_name: str,
     sounddef_name: str,
@@ -236,6 +248,9 @@ def _build_simpleevent(
     category: str,
     template_name: str,
     loop_enabled: bool,
+    pitch_octaves: float | None = None,
+    pitch_units: str | None = None,
+    event_properties: dict[str, str] | None = None,
 ) -> ET.Element:
     simpleevent = ET.Element("simpleevent")
     event = ET.SubElement(simpleevent, "event")
@@ -285,8 +300,11 @@ def _build_simpleevent(
     _append_text(event, "car_loadsmooth", "0.05")
     _append_text(event, "car_loadscale", "6")
     _append_text(event, "volume_db", "0")
-    _append_text(event, "pitch", "0")
-    _append_text(event, "pitch_units", "Octaves")
+    if isinstance(pitch_octaves, (int, float)):
+        _append_text(event, "pitch", f"{pitch_octaves}")
+    else:
+        _append_text(event, "pitch", "0")
+    _append_text(event, "pitch_units", pitch_units or "Octaves")
     _append_text(event, "pitch_randomization", "0")
     _append_text(event, "pitch_randomization_units", "Octaves")
     _append_text(event, "volume_randomization", "0")
@@ -332,6 +350,7 @@ def _build_simpleevent(
     _append_text(event, "fadeout_time", "0")
     _append_text(event, "spawn_intensity", "1")
     _append_text(event, "spawn_intensity_randomization", "0")
+    _apply_event_properties(event, event_properties)
     for key in (
         "LAYERS",
         "KEEP_EFFECTS_PARAMS",
@@ -423,6 +442,7 @@ def build_fdp_project_from_fev(
     fev_path: str,
     template_path: str,
     output_dir: str | None = None,
+    pitch_units_fdp: str | None = None,
 ) -> str:
     if not os.path.isfile(fev_path):
         raise FileNotFoundError(f"FEV not found: {fev_path}")
@@ -430,6 +450,19 @@ def build_fdp_project_from_fev(
         raise FileNotFoundError(f"Template not found: {template_path}")
 
     parsed = parse_fev_event_map(fev_path)
+    pitch_units_map: dict[str, str] = {}
+    fdp_event_props: dict[str, dict] = {}
+    if pitch_units_fdp and os.path.isfile(pitch_units_fdp):
+        try:
+            effects = parse_fdp_event_effects(pitch_units_fdp)
+            fdp_event_props = effects
+            for path, item in effects.items():
+                units = item.get("properties", {}).get("pitch_units")
+                if units:
+                    pitch_units_map[path] = units
+        except Exception:
+            pitch_units_map = {}
+            fdp_event_props = {}
     fev_name = os.path.splitext(os.path.basename(fev_path))[0]
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     output_base = output_dir or os.path.join(repo_root, "build")
@@ -560,6 +593,9 @@ def build_fdp_project_from_fev(
             bank_name = sfx_bank
             if any(item.lengthms and item.lengthms > 30000 for item in event.ref_file_list):
                 bank_name = bgm_bank
+            pitch_octaves = event.pitch_raw * 4.0 if isinstance(event.pitch_raw, (int, float)) else None
+            pitch_units = event.pitch_units or pitch_units_map.get(event_path)
+            event_properties = fdp_event_props.get(event_path, {}).get("properties") if fdp_event_props else None
             eventgroup.append(
                 _build_simpleevent(
                     event_name,
@@ -568,6 +604,9 @@ def build_fdp_project_from_fev(
                     "set_sfx/sfx",
                     template_name,
                     use_loop_template,
+                    pitch_octaves,
+                    pitch_units,
+                    event_properties,
                 )
             )
 
@@ -595,6 +634,9 @@ def build_fdp_project_from_fev(
             bank_name = sfx_bank
             if any(item.lengthms and item.lengthms > 30000 for item in event.ref_file_list):
                 bank_name = bgm_bank
+            pitch_octaves = event.pitch_raw * 4.0 if isinstance(event.pitch_raw, (int, float)) else None
+            pitch_units = event.pitch_units or pitch_units_map.get(event_path)
+            event_properties = fdp_event_props.get(event_path, {}).get("properties") if fdp_event_props else None
             eventgroup.append(
                 _build_simpleevent(
                     event_name,
@@ -603,6 +645,9 @@ def build_fdp_project_from_fev(
                     "set_sfx/sfx",
                     template_name,
                     use_loop_template,
+                    pitch_octaves,
+                    pitch_units,
+                    event_properties,
                 )
             )
 

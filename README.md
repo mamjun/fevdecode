@@ -25,6 +25,29 @@ pip install -r requirements.txt
 python -m fevdecode event-bank-files --fev sound\sora.fev --fsb sound\sora.fsb
 ```
 
+按事件前缀过滤导出：
+
+```powershell
+python -m fevdecode event-bank-files --fev sound\dontstarve_DLC003.fev --event-path sfx/creatures/boss
+```
+
+事件导出会将 Vorbis 也解码为 WAV，并按样本数裁剪以匹配时长。
+
+`event_bank_files.json` 里新增 `effect_params` 字段，保存事件效果参数的原始解析结果。
+如提供 `--fdp`，会额外解析工程里的事件效果属性，输出到 `event_effects`。
+
+导出效果参数统计报告：
+
+```powershell
+python -m fevdecode effect-param-report --fev sound\dontstarve_DLC003.fev --output build\dontstarve_DLC003\effect_param_report.json
+```
+
+对比 FSB 样本元数据与导出 WAV 实测参数：
+
+```powershell
+python -m fevdecode sample-compare --fsb sound\DLC003_sfx.fsb --event-bank-json build\dontstarve_DLC003\dontstarve_DLC003_event_bank_files.json
+```
+
 默认输出到 `build/{fev_name}/`，例如 `build/sora/`。`--output` 与 `--audio-root` 只接受文件名/子目录名，仍会放在该目录下。
 
 若 Vorbis 样本缺少头部信息，会在 `audio` 目录下生成 `missing_vorbis_headers.json`。
@@ -62,6 +85,12 @@ python -m fevdecode gen-all --fev sound\sora.fev
 ```powershell
 python -m fevdecode gen-all --fev sound\sora.fev --fsb sound\sora.fsb
 ```
+```
+
+只导出指定事件前缀：
+
+```powershell
+python -m fevdecode gen-all --name dontstarve_DLC003 --event-path sfx/creatures/boss
 ```
 
 按项目名生成（自动读取 `sound/{name}.fev` / `sound/{name}.fsb`）：

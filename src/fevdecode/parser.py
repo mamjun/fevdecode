@@ -5,9 +5,16 @@ import os
 import re
 import struct
 import uuid
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any, Iterable, Optional
+
+
+_PITCH_UNITS_MAP = {
+    1: "Octaves",
+    3: "Semitones",
+}
 
 
 @dataclass(frozen=True)
@@ -63,6 +70,10 @@ class FmodEvent:
     has_sounddef: bool
     sounddef_index_list: list[int]
     ref_file_list: list[FmodSoundDefFile]
+    effect_params: list[dict]
+    pitch_raw: float | None = None
+    pitch_units_code: int | None = None
+    pitch_units: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +87,7 @@ def build_event_bank_file_map(
     fev_path: str,
     fsb_path: str | None = None,
     fsb_map: dict[str, str] | None = None,
+    fdp_path: str | None = None,
 ) -> dict:
     parsed = parse_fev_event_map(fev_path)
     fsb = None
@@ -107,6 +119,9 @@ def build_event_bank_file_map(
             normalized_lookup = _build_normalized_sample_lookup(fsb_lookup)
 
     events: list[dict] = []
+    fdp_effects: dict[str, dict] = {}
+    if fdp_path:
+        fdp_effects = parse_fdp_event_effects(fdp_path)
     for path, event in parsed.event_map.items():
         files: list[dict] = []
         for item in event.ref_file_list:
@@ -142,7 +157,13 @@ def build_event_bank_file_map(
                 "event": path,
                 "is_simple": event.is_simple,
                 "has_sounddef": event.has_sounddef,
+                "pitch_raw": event.pitch_raw,
+                "pitch_octaves": (event.pitch_raw * 4.0) if isinstance(event.pitch_raw, (int, float)) else None,
+                "pitch_units_code": event.pitch_units_code,
+                "pitch_units": event.pitch_units,
                 "files": files,
+                "effect_params": list(event.effect_params),
+                "event_effects": fdp_effects.get(path, {}),
                 "matched_samples": matched_samples,
             }
         )
@@ -179,7 +200,12 @@ def serialize_fmod_events(parsed: FmodFevParsed) -> list[dict]:
                 "is_simple": event.is_simple,
                 "has_sounddef": event.has_sounddef,
                 "sounddef_index_list": list(event.sounddef_index_list),
+                "pitch_raw": event.pitch_raw,
+                "pitch_octaves": (event.pitch_raw * 4.0) if isinstance(event.pitch_raw, (int, float)) else None,
+                "pitch_units_code": event.pitch_units_code,
+                "pitch_units": event.pitch_units,
                 "files": files,
+                "effect_params": list(event.effect_params),
             }
         )
     return results
@@ -445,7 +471,10 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
             event_type = reader.read_u32()
             if event_type == 16:
                 name_index = reader.read_u32()
-                reader.skip(16 + 144)
+                header = reader.read_exact(16 + 144)
+                pitch_raw = struct.unpack_from("<f", header, 20)[0]
+                pitch_units_code = struct.unpack_from("<I", header, 36)[0]
+                pitch_units = _PITCH_UNITS_MAP.get(pitch_units_code)
                 num = reader.read_u32()
                 if num > 1:
                     raise ValueError("Simple event must have only 0/1 sounddef")
@@ -461,12 +490,19 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
                         has_sounddef=num > 0,
                         sounddef_index_list=[def_index],
                         ref_file_list=[],
+                        effect_params=[],
+                        pitch_raw=pitch_raw,
+                        pitch_units_code=pitch_units_code,
+                        pitch_units=pitch_units,
                     )
                 )
                 return
             if event_type == 8:
                 name_index = reader.read_u32()
-                reader.skip(16 + 144)
+                header = reader.read_exact(16 + 144)
+                pitch_raw = struct.unpack_from("<f", header, 20)[0]
+                pitch_units_code = struct.unpack_from("<I", header, 36)[0]
+                pitch_units = _PITCH_UNITS_MAP.get(pitch_units_code)
                 num_layers = reader.read_u32()
                 refs: list[int] = []
                 for _ in range(num_layers):
@@ -487,7 +523,7 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
                         reader.skip(4 * num_points)
                         reader.skip(8)
                 num_params = reader.read_u32()
-                reader.skip(32 * num_params)
+                effect_params = _parse_event_params(reader, num_params)
                 reader.skip(8)
                 _ = reader.read_l_buf()
                 path_index = item_index_stack + [name_index]
@@ -499,6 +535,10 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
                         has_sounddef=len(refs) > 0,
                         sounddef_index_list=refs,
                         ref_file_list=[],
+                        effect_params=effect_params,
+                        pitch_raw=pitch_raw,
+                        pitch_units_code=pitch_units_code,
+                        pitch_units=pitch_units,
                     )
                 )
                 return
@@ -1045,6 +1085,113 @@ def _read_packed_table_indices(reader: _PackedReader, table_type: int) -> list[i
             break
         values.append(data[i] | (data[i + 1] << 8) | (data[i + 2] << 16))
     return values
+
+
+def parse_fdp_event_effects(fdp_path: str) -> dict[str, dict]:
+    try:
+        tree = ET.parse(fdp_path)
+    except Exception:
+        return {}
+    root = tree.getroot()
+
+    effect_keys = {
+        "volume_db",
+        "volume_randomization",
+        "pitch",
+        "pitch_units",
+        "pitch_randomization",
+        "pitch_randomization_units",
+        "reverbdrylevel_db",
+        "reverblevel_db",
+        "auto_distance_filtering",
+        "distance_filter_centre_freq",
+        "mindistance",
+        "maxdistance",
+        "rolloff",
+        "cone_inside_angle",
+        "cone_outside_angle",
+        "cone_outside_volumedb",
+        "doppler_scale",
+        "speaker_spread",
+        "panlevel3d",
+        "mode",
+        "ignoregeometry",
+        "headrelative",
+        "speaker_config",
+    }
+
+    def parse_envelopes(event_node: ET.Element) -> list[dict]:
+        envelopes: list[dict] = []
+        for envelope in event_node.findall(".//envelope"):
+            dsp_name = envelope.findtext("dsp_name")
+            dsp_paramindex = envelope.findtext("dsp_paramindex")
+            if not dsp_name and not dsp_paramindex:
+                continue
+            envelopes.append(
+                {
+                    "dsp_name": dsp_name,
+                    "dsp_paramindex": dsp_paramindex,
+                    "parametername": envelope.findtext("parametername"),
+                    "controlparameter": envelope.findtext("controlparameter"),
+                    "points": [p.text for p in envelope.findall("point") if p.text],
+                }
+            )
+        return envelopes
+
+    def parse_event_node(event_node: ET.Element) -> dict:
+        props: dict[str, str] = {}
+        for key in effect_keys:
+            value = event_node.findtext(key)
+            if value is not None:
+                props[key] = value
+        envelopes = parse_envelopes(event_node)
+        return {
+            "properties": props,
+            "envelopes": envelopes,
+        }
+
+    results: dict[str, dict] = {}
+
+    def walk_group(node: ET.Element, prefix: list[str]) -> None:
+        for group in node.findall("eventgroup"):
+            name = group.findtext("name") or ""
+            next_prefix = prefix + [name] if name else list(prefix)
+            for simple in group.findall("simpleevent"):
+                for event_node in simple.findall("event"):
+                    event_name = event_node.findtext("name") or ""
+                    if not event_name:
+                        continue
+                    path = "/".join([p for p in next_prefix + [event_name] if p])
+                    results[path] = parse_event_node(event_node)
+            for event_node in group.findall("event"):
+                event_name = event_node.findtext("name") or ""
+                if not event_name:
+                    continue
+                path = "/".join([p for p in next_prefix + [event_name] if p])
+                results[path] = parse_event_node(event_node)
+            walk_group(group, next_prefix)
+
+    walk_group(root, [])
+    return results
+
+
+def _parse_event_params(reader: _FevStreamReader, num_params: int) -> list[dict]:
+    params: list[dict] = []
+    if num_params <= 0:
+        return params
+    for _ in range(num_params):
+        raw = reader.read_exact(32)
+        u32 = struct.unpack("<8I", raw)
+        f32 = struct.unpack("<8f", raw)
+        params.append(
+            {
+                "param_id": int(u32[0]),
+                "value": float(f32[1]),
+                "raw_u32": [int(x) for x in u32],
+                "raw_f32": [float(x) for x in f32],
+            }
+        )
+    return params
 
 
 def _event_to_sample_name(event: str) -> str:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import csv
 import io
 import json
 import logging
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import wave
 from datetime import datetime
 from typing import Iterable
 
@@ -70,6 +72,38 @@ def _event_to_dir(event_path: str) -> str:
         return "root"
     parts = [p for p in normalized.split("/") if p]
     return os.path.join(*[_sanitize_path_segment(p) for p in parts])
+
+
+def _normalize_event_filter(value: str) -> str:
+    normalized = value.replace("\\", "/").strip()
+    if normalized.startswith("event:"):
+        normalized = normalized[len("event:"):]
+    if normalized.startswith("snapshot:"):
+        normalized = normalized[len("snapshot:"):]
+    normalized = normalized.strip("/")
+    return normalized
+
+
+def _event_matches_filter(event: dict, filter_prefix: str) -> bool:
+    if not filter_prefix:
+        return True
+    normalized_filter = _normalize_event_filter(filter_prefix)
+    if not normalized_filter:
+        return True
+    prefixes = {normalized_filter}
+    if normalized_filter.startswith("sfx/"):
+        prefixes.add(normalized_filter[len("sfx/"):])
+    else:
+        prefixes.add(f"sfx/{normalized_filter}")
+
+    event_path = _normalize_event_filter(event.get("event", ""))
+    if event_path and any(event_path.startswith(prefix) for prefix in prefixes):
+        return True
+    for entry in event.get("files", []):
+        file_path = _normalize_event_filter(entry.get("path", ""))
+        if file_path and any(file_path.startswith(prefix) for prefix in prefixes):
+            return True
+    return False
 
 
 def _ensure_unique_path(path: str) -> str:
@@ -239,6 +273,25 @@ def _decode_to_wav(data: bytes, ext: str) -> bytes:
     return out.getvalue()
 
 
+def _trim_wav_to_samples(wav_data: bytes, target_frames: int | None) -> bytes:
+    if not isinstance(target_frames, int) or target_frames <= 0:
+        return wav_data
+    try:
+        with wave.open(io.BytesIO(wav_data), "rb") as reader:
+            params = reader.getparams()
+            total_frames = reader.getnframes()
+            if target_frames >= total_frames:
+                return wav_data
+            frames = reader.readframes(target_frames)
+        out = io.BytesIO()
+        with wave.open(out, "wb") as writer:
+            writer.setparams(params)
+            writer.writeframes(frames)
+        return out.getvalue()
+    except Exception:
+        return wav_data
+
+
 def cmd_extract_fsb(args: argparse.Namespace) -> int:
     fsb = _load_fsb5_library(args.input)
     ext = _fsb5_extension(fsb)
@@ -333,6 +386,19 @@ def _resolve_fsb_map_for_fev(fev_path: str) -> dict[str, str]:
                 fsb_map[bank_name] = candidate
                 break
     return fsb_map
+
+
+def _resolve_fdp_for_fev(fev_path: str) -> str | None:
+    directory = os.path.dirname(fev_path)
+    base = os.path.splitext(os.path.basename(fev_path))[0]
+    candidates = [
+        os.path.join(directory, base + ".fdp"),
+        os.path.join(_get_repo_root(), "fdp", base + ".fdp"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
 
 
 def cmd_extract_events(args: argparse.Namespace) -> int:
@@ -433,10 +499,252 @@ def cmd_event_map(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_effect_param_report(args: argparse.Namespace) -> int:
+    fev_path = os.path.abspath(args.fev)
+    output_path = os.path.abspath(args.output)
+    parsed = parse_fev_event_map(fev_path)
+
+    stats: dict[int, dict] = {}
+    for path, event in parsed.event_map.items():
+        for param in event.effect_params:
+            param_id = int(param.get("param_id", -1))
+            value = param.get("value")
+            if param_id < 0 or not isinstance(value, (int, float)):
+                continue
+            entry = stats.setdefault(
+                param_id,
+                {
+                    "param_id": param_id,
+                    "count": 0,
+                    "min": value,
+                    "max": value,
+                    "sum": 0.0,
+                    "sample_values": [],
+                    "sample_events": [],
+                },
+            )
+            entry["count"] += 1
+            entry["sum"] += float(value)
+            entry["min"] = min(entry["min"], value)
+            entry["max"] = max(entry["max"], value)
+            if len(entry["sample_values"]) < 5:
+                entry["sample_values"].append(value)
+            if len(entry["sample_events"]) < 5:
+                entry["sample_events"].append(path)
+
+    params = []
+    for item in stats.values():
+        avg = item["sum"] / item["count"] if item["count"] else 0.0
+        params.append(
+            {
+                "param_id": item["param_id"],
+                "count": item["count"],
+                "min": item["min"],
+                "max": item["max"],
+                "avg": avg,
+                "sample_values": item["sample_values"],
+                "sample_events": item["sample_events"],
+            }
+        )
+
+    params.sort(key=lambda x: (-x["count"], x["param_id"]))
+
+    report = {
+        "fev": fev_path,
+        "event_count": len(parsed.event_map),
+        "param_count": len(params),
+        "params": params,
+    }
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as fp:
+        json.dump(report, fp, ensure_ascii=False, indent=2)
+    print(f"Wrote {len(params)} params to {output_path}")
+    return 0
+
+
+def _load_event_bank_audio_map(json_path: str) -> dict[str, list[str]]:
+    if not os.path.isfile(json_path):
+        raise FileNotFoundError(f"event_bank_files.json not found: {json_path}")
+    with open(json_path, "r", encoding="utf-8") as fp:
+        data = json.load(fp)
+    sample_map: dict[str, list[str]] = {}
+    for event in data.get("events", []) or []:
+        for entry in event.get("files", []) or []:
+            sample_name = entry.get("sample_name")
+            audio_output = entry.get("audio_output")
+            if not sample_name or not audio_output:
+                continue
+            sample_map.setdefault(sample_name, []).append(audio_output)
+    return sample_map
+
+
+def _read_wav_info(path: str) -> dict[str, int | float] | None:
+    if not os.path.isfile(path):
+        return None
+    try:
+        with wave.open(path, "rb") as reader:
+            rate = int(reader.getframerate())
+            frames = int(reader.getnframes())
+            channels = int(reader.getnchannels())
+        duration = frames / rate if rate else 0.0
+        return {
+            "rate": rate,
+            "frames": frames,
+            "channels": channels,
+            "duration": duration,
+        }
+    except Exception:
+        return None
+
+
+def _resolve_sample_compare_outputs(output_arg: str | None, event_bank_json: str, fsb_path: str) -> tuple[str, str]:
+    base_name = os.path.splitext(os.path.basename(fsb_path))[0]
+    default_dir = os.path.dirname(event_bank_json)
+    default_csv = os.path.join(default_dir, f"{base_name}_sample_compare.csv")
+    if not output_arg:
+        csv_path = default_csv
+    else:
+        output_arg = os.path.abspath(output_arg)
+        if output_arg.lower().endswith(".csv"):
+            csv_path = output_arg
+        else:
+            csv_path = os.path.join(output_arg, f"{base_name}_sample_compare.csv")
+    json_path = os.path.splitext(csv_path)[0] + ".summary.json"
+    return csv_path, json_path
+
+
+def cmd_sample_compare(args: argparse.Namespace) -> int:
+    fsb_path = os.path.abspath(args.fsb)
+    event_bank_json = os.path.abspath(args.event_bank_json)
+    rate_tol = float(args.rate_tolerance)
+    duration_tol = float(args.duration_tolerance)
+
+    fsb = _load_fsb5_library(fsb_path)
+    sample_audio_map = _load_event_bank_audio_map(event_bank_json)
+    csv_path, json_path = _resolve_sample_compare_outputs(args.output, event_bank_json, fsb_path)
+    os.makedirs(os.path.dirname(csv_path), exist_ok=True) if os.path.dirname(csv_path) else None
+
+    total = 0
+    missing_audio = 0
+    missing_wav = 0
+    rate_mismatch = 0
+    duration_mismatch = 0
+    rows: list[dict[str, object]] = []
+
+    for sample in fsb.samples:
+        total += 1
+        name = getattr(sample, "name", "")
+        freq = getattr(sample, "frequency", None)
+        samples = getattr(sample, "samples", None)
+        channels = getattr(sample, "channels", None)
+        expected_duration = None
+        if isinstance(freq, (int, float)) and freq:
+            if isinstance(samples, (int, float)):
+                expected_duration = float(samples) / float(freq)
+
+        candidates = sample_audio_map.get(name) or []
+        wav_info = None
+        wav_path = None
+        for candidate in candidates:
+            info = _read_wav_info(candidate)
+            if info:
+                wav_info = info
+                wav_path = candidate
+                break
+
+        if not candidates:
+            missing_audio += 1
+        if candidates and not wav_info:
+            missing_wav += 1
+
+        wav_rate = wav_info["rate"] if wav_info else None
+        wav_frames = wav_info["frames"] if wav_info else None
+        wav_duration = wav_info["duration"] if wav_info else None
+        wav_channels = wav_info["channels"] if wav_info else None
+
+        rate_ratio = None
+        duration_ratio = None
+        notes = []
+        if isinstance(freq, (int, float)) and freq and isinstance(wav_rate, int) and wav_rate:
+            rate_ratio = wav_rate / float(freq)
+            if abs(rate_ratio - 1.0) > rate_tol:
+                rate_mismatch += 1
+                notes.append("rate_mismatch")
+        if expected_duration and isinstance(wav_duration, float) and wav_duration:
+            duration_ratio = wav_duration / expected_duration
+            if abs(duration_ratio - 1.0) > duration_tol:
+                duration_mismatch += 1
+                notes.append("duration_mismatch")
+
+        rows.append(
+            {
+                "sample_name": name,
+                "fsb_frequency": freq,
+                "fsb_samples": samples,
+                "fsb_channels": channels,
+                "expected_duration_sec": expected_duration,
+                "wav_path": wav_path,
+                "wav_rate": wav_rate,
+                "wav_frames": wav_frames,
+                "wav_channels": wav_channels,
+                "wav_duration_sec": wav_duration,
+                "rate_ratio": rate_ratio,
+                "duration_ratio": duration_ratio,
+                "notes": ";".join(notes),
+            }
+        )
+
+    with open(csv_path, "w", encoding="utf-8", newline="") as fp:
+        writer = csv.DictWriter(
+            fp,
+            fieldnames=[
+                "sample_name",
+                "fsb_frequency",
+                "fsb_samples",
+                "fsb_channels",
+                "expected_duration_sec",
+                "wav_path",
+                "wav_rate",
+                "wav_frames",
+                "wav_channels",
+                "wav_duration_sec",
+                "rate_ratio",
+                "duration_ratio",
+                "notes",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    summary = {
+        "fsb": fsb_path,
+        "event_bank_json": event_bank_json,
+        "total_samples": total,
+        "missing_audio_output": missing_audio,
+        "missing_wav_files": missing_wav,
+        "rate_mismatch": rate_mismatch,
+        "duration_mismatch": duration_mismatch,
+        "rate_tolerance": rate_tol,
+        "duration_tolerance": duration_tol,
+        "csv": csv_path,
+    }
+    with open(json_path, "w", encoding="utf-8") as fp:
+        json.dump(summary, fp, ensure_ascii=False, indent=2)
+
+    print(f"Wrote sample compare CSV: {csv_path}")
+    print(f"Wrote summary JSON: {json_path}")
+    print(
+        "Summary: total=%s missing_audio=%s missing_wav=%s rate_mismatch=%s duration_mismatch=%s"
+        % (total, missing_audio, missing_wav, rate_mismatch, duration_mismatch)
+    )
+    return 0
+
+
 def cmd_event_bank_files(args: argparse.Namespace) -> int:
     logger = _get_logger("event_bank_files")
     started = time.time()
     fev_path = os.path.abspath(args.fev)
+    fdp_path = os.path.abspath(args.fdp) if getattr(args, "fdp", None) else _resolve_fdp_for_fev(fev_path)
     fsb_map = getattr(args, "fsb_map", None)
     if fsb_map:
         fsb_map = {bank: os.path.abspath(path) for bank, path in fsb_map.items()}
@@ -463,8 +771,16 @@ def cmd_event_bank_files(args: argparse.Namespace) -> int:
         audio_name = "audio"
     audio_root = os.path.join(output_root, audio_name)
 
-    mapping = build_event_bank_file_map(fev_path, fsb_path, fsb_map)
-    logger.info("Parsed event map: %s events", len(mapping.get("events", [])))
+    mapping = build_event_bank_file_map(fev_path, fsb_path, fsb_map, fdp_path)
+    total_events = len(mapping.get("events", []))
+    logger.info("Parsed event map: %s events", total_events)
+    filter_prefix = getattr(args, "event_path", None)
+    if filter_prefix:
+        filtered_events = [event for event in mapping.get("events", []) if _event_matches_filter(event, filter_prefix)]
+        mapping["events"] = filtered_events
+        mapping["event_count"] = len(filtered_events)
+        mapping["event_filter"] = filter_prefix
+        logger.info("Filtered events: %s -> %s by prefix=%s", total_events, len(filtered_events), filter_prefix)
     logger.info("Audio root: %s", audio_root)
 
     libs_base = os.path.abspath(os.path.join(os.getcwd(), "libs"))
@@ -507,19 +823,17 @@ def cmd_event_bank_files(args: argparse.Namespace) -> int:
         logger.info("Parsed FSB samples: %s (%s)", len(fsb.samples), bank_fsb_path)
         is_vorbis = _is_vorbis_fsb(fsb)
         ext = "ogg" if is_vorbis else _fsb5_extension(fsb)
-        if is_vorbis:
-            logger.info("Decode mode: python-fsb5 (ogg)")
-        else:
-            logger.info("Decode mode: ffmpeg (jobs=%s)", jobs)
+        logger.info("Decode mode: ffmpeg (jobs=%s)", jobs)
+        decoder_name = "ffmpeg" if ext != "wav" else "passthrough"
 
         def _decode_entry(file_index: int) -> bytes:
             sample = fsb.samples[file_index]
             data = fsb.rebuild_sample(sample)
             if ext == "mp3" and not args.no_fix_mp3:
                 data = clean_mpeg_padding(data)
-            if is_vorbis:
-                return data
-            return _decode_to_wav(data, ext)
+            wav_data = _decode_to_wav(data, ext)
+            target_frames = getattr(sample, "samples", None)
+            return _trim_wav_to_samples(wav_data, int(target_frames) if target_frames else None)
         tasks: list[tuple[dict, str, int]] = []
         for event in mapping.get("events", []):
             event_path = event.get("event", "")
@@ -541,14 +855,14 @@ def cmd_event_bank_files(args: argparse.Namespace) -> int:
             if not base_name:
                 base_name = f"file_{file_index}"
             safe_name = _sanitize_path_segment(base_name)
-            output_ext = "ogg" if is_vorbis else "wav"
+            output_ext = "wav"
             output_file = os.path.join(event_dir, f"{safe_name}.{output_ext}")
             os.makedirs(os.path.dirname(output_file), exist_ok=True)
             with open(output_file, "wb") as out:
                 out.write(wav_data)
             entry["audio_status"] = "written"
             entry["audio_output"] = output_file
-            entry["audio_decoder"] = "python-fsb5" if is_vorbis else "ffmpeg"
+            entry["audio_decoder"] = decoder_name
             logger.info("Wrote audio: %s", output_file)
             logger.info("Audio decode: %s -> %s", entry["audio_decoder"], output_file)
 
@@ -667,6 +981,8 @@ def cmd_gen_all(args: argparse.Namespace) -> int:
         no_fix_mp3=args.no_fix_mp3,
         jobs=args.jobs,
         output_dir=args.output_dir,
+        fdp=getattr(args, "fdp", None),
+        event_path=getattr(args, "event_path", None),
     )
     try:
         has_fsb = bool(fsb_map) or (fsb_path and os.path.isfile(fsb_path))
@@ -677,7 +993,8 @@ def cmd_gen_all(args: argparse.Namespace) -> int:
     except Exception as exc:
         logger.warning("event_bank_files skipped: %s", exc)
 
-    output_path = build_fdp_project_from_fev(args.fev, args.template, args.output_dir)
+    pitch_units_fdp = getattr(args, "fdp", None) or _resolve_fdp_for_fev(args.fev)
+    output_path = build_fdp_project_from_fev(args.fev, args.template, args.output_dir, pitch_units_fdp)
     print(f"Wrote {output_path}")
     logger.info("Generated fdp: %s", output_path)
     logger.info("Done gen_all in %.2fs", time.time() - started)
@@ -721,12 +1038,49 @@ def build_parser() -> argparse.ArgumentParser:
     event_map_cmd.add_argument("--output", required=True, help="output json path")
     event_map_cmd.set_defaults(func=cmd_event_map)
 
+    effect_param_cmd = sub.add_parser("effect-param-report", help="summarize event effect params")
+    effect_param_cmd.add_argument("--fev", required=True, help="input .fev file")
+    effect_param_cmd.add_argument("--output", required=True, help="output json path")
+    effect_param_cmd.set_defaults(func=cmd_effect_param_report)
+
+    sample_compare_cmd = sub.add_parser("sample-compare", help="compare FSB sample metadata with exported WAVs")
+    sample_compare_cmd.add_argument("--fsb", required=True, help="input .fsb file")
+    sample_compare_cmd.add_argument(
+        "--event-bank-json",
+        required=True,
+        help="event_bank_files.json generated by event-bank-files",
+    )
+    sample_compare_cmd.add_argument(
+        "--output",
+        required=False,
+        help="output CSV path or directory (default: alongside event_bank_files.json)",
+    )
+    sample_compare_cmd.add_argument(
+        "--rate-tolerance",
+        type=float,
+        default=0.01,
+        help="allowed ratio drift between wav_rate and fsb_frequency (default: 0.01)",
+    )
+    sample_compare_cmd.add_argument(
+        "--duration-tolerance",
+        type=float,
+        default=0.01,
+        help="allowed ratio drift between wav_duration and expected duration (default: 0.01)",
+    )
+    sample_compare_cmd.set_defaults(func=cmd_sample_compare)
+
     bank_files_cmd = sub.add_parser("event-bank-files", help="write event-bank files json and export wav audio")
     bank_files_cmd.add_argument("--fev", required=True, help="input .fev file")
     bank_files_cmd.add_argument("--fsb", required=False, help="input .fsb file (optional)")
     bank_files_cmd.add_argument("--output", required=False, help="output json file name (always placed under build/{fev_name})")
     bank_files_cmd.add_argument("--audio-root", required=False, help="audio subdirectory name (always placed under build/{fev_name})")
     bank_files_cmd.add_argument("--output-dir", required=False, help="output base directory (default: build; output is {base}/{fev_name})")
+    bank_files_cmd.add_argument("--fdp", required=False, help="input .fdp file (optional, for effect params)")
+    bank_files_cmd.add_argument(
+        "--event-path",
+        required=False,
+        help="only export events under this path prefix (e.g. sfx/creatures/boss)",
+    )
     bank_files_cmd.add_argument("--no-fix-mp3", action="store_true", help="do not remove mp3 inter-frame padding")
     bank_files_cmd.add_argument("--jobs", type=int, default=16, help="number of worker threads for ffmpeg decoding")
     bank_files_cmd.set_defaults(func=cmd_event_bank_files)
@@ -752,8 +1106,14 @@ def build_parser() -> argparse.ArgumentParser:
     gen_all_cmd.add_argument("--sound-dir", required=False, help="sound directory (default: ./sound)")
     gen_all_cmd.add_argument("--output", required=False, help="event_bank_files.json output name (placed under build/{fev_name})")
     gen_all_cmd.add_argument("--audio-root", required=False, help="audio subdirectory name (placed under build/{fev_name})")
+    gen_all_cmd.add_argument(
+        "--event-path",
+        required=False,
+        help="only export events under this path prefix (e.g. sfx/creatures/boss)",
+    )
     gen_all_cmd.add_argument("--no-fix-mp3", action="store_true", help="do not remove mp3 inter-frame padding")
     gen_all_cmd.add_argument("--jobs", type=int, default=16, help="number of worker threads for ffmpeg decoding")
+    gen_all_cmd.add_argument("--fdp", required=False, help="input .fdp file (optional, for effect params)")
     gen_all_cmd.add_argument(
         "--template",
         default=os.path.join(os.path.dirname(__file__), "..", "..", "temp", "basic.fdp"),
