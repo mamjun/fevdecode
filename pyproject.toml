@@ -11,7 +11,7 @@ requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Your Name" }]
 keywords = ["fev", "fsb", "fdp"]
-dependencies = ["python-fsb5", "lxml"]
+dependencies = [ "lxml"]
 
 [project.scripts]
 fevdecode = "fevdecode.cli:main"
