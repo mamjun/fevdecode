@@ -94,6 +94,9 @@ class FmodEvent:
     spawn_intensity: float | None = None
     spawn_intensity_randomization: float | None = None
     max_playbacks: int | None = None
+    priority: int | None = None
+    fade_in_time: int | None = None
+    fade_out_time: int | None = None
 
 
 @dataclass(frozen=True)
@@ -187,6 +190,9 @@ def build_event_bank_file_map(
                 "spawn_intensity": event.spawn_intensity,
                 "spawn_intensity_randomization": event.spawn_intensity_randomization,
                 "max_playbacks": event.max_playbacks,
+                "priority": event.priority,
+                "fade_in_time": event.fade_in_time,
+                "fade_out_time": event.fade_out_time,
                 "files": files,
                 "effect_params": list(event.effect_params),
                 "event_effects": fdp_effects.get(path, {}),
@@ -236,6 +242,9 @@ def serialize_fmod_events(parsed: FmodFevParsed) -> list[dict]:
                 "spawn_intensity": event.spawn_intensity,
                 "spawn_intensity_randomization": event.spawn_intensity_randomization,
                 "max_playbacks": event.max_playbacks,
+                "priority": event.priority,
+                "fade_in_time": event.fade_in_time,
+                "fade_out_time": event.fade_out_time,
                 "files": files,
                 "effect_params": list(event.effect_params),
             }
@@ -509,6 +518,8 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
                 volume_randomization = struct.unpack_from("<f", header, 28)[0]
                 volume_randomization_db = _linear_randomization_to_db(volume_randomization)
                 max_playbacks = struct.unpack_from("<I", header, 36)[0]
+                priority = struct.unpack_from("<I", header, 32)[0]
+                fade_in_time = struct.unpack_from("<I", header, 132)[0]
                 spawn_intensity = struct.unpack_from("<f", header, 140)[0]
                 spawn_intensity_randomization = struct.unpack_from("<f", header, 144)[0]
                 pitch_units_code = None
@@ -538,6 +549,9 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
                         spawn_intensity=spawn_intensity,
                         spawn_intensity_randomization=spawn_intensity_randomization,
                         max_playbacks=max_playbacks,
+                        priority=priority,
+                        fade_in_time=fade_in_time,
+                        fade_out_time=None,
                     )
                 )
                 return
@@ -549,6 +563,8 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
                 volume_randomization = struct.unpack_from("<f", header, 28)[0]
                 volume_randomization_db = _linear_randomization_to_db(volume_randomization)
                 max_playbacks = struct.unpack_from("<I", header, 36)[0]
+                priority = struct.unpack_from("<I", header, 32)[0]
+                fade_in_time = struct.unpack_from("<I", header, 132)[0]
                 spawn_intensity = struct.unpack_from("<f", header, 140)[0]
                 spawn_intensity_randomization = struct.unpack_from("<f", header, 144)[0]
                 pitch_units_code = None
@@ -595,6 +611,9 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
                         spawn_intensity=spawn_intensity,
                         spawn_intensity_randomization=spawn_intensity_randomization,
                         max_playbacks=max_playbacks,
+                        priority=priority,
+                        fade_in_time=fade_in_time,
+                        fade_out_time=None,
                     )
                 )
                 return

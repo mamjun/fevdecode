@@ -271,6 +271,12 @@ def _build_fev_event_properties(parsed_events: dict[str, "FmodEvent"]) -> dict[s
             props["spawn_intensity_randomization"] = _format_float(float(event.spawn_intensity_randomization))
         if isinstance(event.max_playbacks, int):
             props["maxplaybacks"] = str(event.max_playbacks)
+        if isinstance(event.priority, int):
+            props["priority"] = str(event.priority)
+        if isinstance(event.fade_in_time, int):
+            props["fadein_time"] = _format_float(float(event.fade_in_time))
+        if isinstance(event.fade_out_time, int):
+            props["fadeout_time"] = _format_float(float(event.fade_out_time))
         if props:
             results[path] = props
     return results
