@@ -79,12 +79,12 @@ python -m fevdecode gen-fdp --fev sound\sora.fev
 
 ```powershell
 python -m fevdecode gen-all --fev sound\sora.fev
+```
 
 手动指定 FSB：
 
 ```powershell
 python -m fevdecode gen-all --fev sound\sora.fev --fsb sound\sora.fsb
-```
 ```
 
 只导出指定事件前缀：
@@ -93,10 +93,17 @@ python -m fevdecode gen-all --fev sound\sora.fev --fsb sound\sora.fsb
 python -m fevdecode gen-all --name dontstarve_DLC003 --event-path sfx/creatures/boss
 ```
 
-按项目名生成（自动读取 `sound/{name}.fev` / `sound/{name}.fsb`）：
+按项目名生成（自动读取 `sound/{name}.fev` / `sound/{name}.fsb`，`--name` 允许带 `.fev` 后缀，会自动去除）：
 
 ```powershell
 python -m fevdecode gen-all --name dontstarve_DLC003
+```
+
+使用 `gen_all.bat`（执行前会提示确认；不带参数时默认执行 `--name dontstarve_DLC003`）：
+
+```powershell
+./gen_all.bat
+./gen_all.bat --name dontstarve_DLC003.fev
 ```
 
 可自定义模板与输出目录：

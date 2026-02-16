@@ -273,10 +273,6 @@ def _build_fev_event_properties(parsed_events: dict[str, "FmodEvent"]) -> dict[s
             props["maxplaybacks"] = str(event.max_playbacks)
         if isinstance(event.priority, int):
             props["priority"] = str(event.priority)
-        if isinstance(event.fade_in_time, int):
-            props["fadein_time"] = _format_float(float(event.fade_in_time))
-        if isinstance(event.fade_out_time, int):
-            props["fadeout_time"] = _format_float(float(event.fade_out_time))
         if props:
             results[path] = props
     return results
@@ -387,8 +383,6 @@ def _build_simpleevent(
     _append_text(event, "reverblevel_db", "0")
     _append_text(event, "speaker_spread", "0")
     _append_text(event, "panlevel3d", "1")
-    _append_text(event, "fadein_time", "0")
-    _append_text(event, "fadeout_time", "0")
     _append_text(event, "spawn_intensity", "1")
     _append_text(event, "spawn_intensity_randomization", "0")
     _apply_event_properties(event, event_properties)
@@ -428,8 +422,6 @@ def _build_simpleevent(
         "X_2D_SPEAKER_RR",
         "X_SPEAKER_LFE",
         "ONESHOT",
-        "FADEIN_TIME",
-        "FADEOUT_TIME",
         "NOTES",
         "USER_PROPERTIES",
         "CATEGORY",

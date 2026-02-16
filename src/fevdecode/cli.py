@@ -141,6 +141,17 @@ def _get_logger(name: str) -> logging.Logger:
     return logger
 
 
+def _ensure_console_logger(logger: logging.Logger) -> None:
+    for handler in logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            return
+    handler = logging.StreamHandler()
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+
 def _find_local_ffmpeg() -> str | None:
     repo_root = _get_repo_root()
     candidates = [
@@ -943,12 +954,15 @@ def cmd_gen_fdp(args: argparse.Namespace) -> int:
 
 def cmd_gen_all(args: argparse.Namespace) -> int:
     logger = _get_logger("gen_all")
+    _ensure_console_logger(logger)
     started = time.time()
     if not args.name and not args.fev:
         raise ValueError("Provide --name or --fev")
     if args.name and args.fev:
         raise ValueError("Use either --name or --fev, not both")
     if args.name:
+        if args.name.lower().endswith(".fev"):
+            args.name = os.path.splitext(args.name)[0]
         sound_dir = os.path.abspath(args.sound_dir or os.path.join(os.getcwd(), "sound"))
         fev_path = os.path.join(sound_dir, f"{args.name}.fev")
         args.fev = fev_path
