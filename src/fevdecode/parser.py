@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import math
 import os
 import re
 import struct
@@ -15,6 +16,19 @@ _PITCH_UNITS_MAP = {
     1: "Octaves",
     3: "Semitones",
 }
+
+
+def _linear_to_db(value: float) -> float:
+    if value <= 0:
+        return -96.0
+    return 20.0 * math.log10(value)
+
+
+def _linear_randomization_to_db(value: float) -> float:
+    linear = 1.0 - value
+    if linear <= 0:
+        return -96.0
+    return _linear_to_db(linear)
 
 
 @dataclass(frozen=True)
@@ -74,6 +88,12 @@ class FmodEvent:
     pitch_raw: float | None = None
     pitch_units_code: int | None = None
     pitch_units: str | None = None
+    volume_raw: float | None = None
+    volume_randomization: float | None = None
+    volume_randomization_db: float | None = None
+    spawn_intensity: float | None = None
+    spawn_intensity_randomization: float | None = None
+    max_playbacks: int | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +181,12 @@ def build_event_bank_file_map(
                 "pitch_octaves": (event.pitch_raw * 4.0) if isinstance(event.pitch_raw, (int, float)) else None,
                 "pitch_units_code": event.pitch_units_code,
                 "pitch_units": event.pitch_units,
+                "volume_raw": event.volume_raw,
+                "volume_randomization": event.volume_randomization_db,
+                "volume_randomization_raw": event.volume_randomization,
+                "spawn_intensity": event.spawn_intensity,
+                "spawn_intensity_randomization": event.spawn_intensity_randomization,
+                "max_playbacks": event.max_playbacks,
                 "files": files,
                 "effect_params": list(event.effect_params),
                 "event_effects": fdp_effects.get(path, {}),
@@ -204,6 +230,12 @@ def serialize_fmod_events(parsed: FmodFevParsed) -> list[dict]:
                 "pitch_octaves": (event.pitch_raw * 4.0) if isinstance(event.pitch_raw, (int, float)) else None,
                 "pitch_units_code": event.pitch_units_code,
                 "pitch_units": event.pitch_units,
+                "volume_raw": event.volume_raw,
+                "volume_randomization": event.volume_randomization_db,
+                "volume_randomization_raw": event.volume_randomization,
+                "spawn_intensity": event.spawn_intensity,
+                "spawn_intensity_randomization": event.spawn_intensity_randomization,
+                "max_playbacks": event.max_playbacks,
                 "files": files,
                 "effect_params": list(event.effect_params),
             }
@@ -472,9 +504,15 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
             if event_type == 16:
                 name_index = reader.read_u32()
                 header = reader.read_exact(16 + 144)
+                volume_raw = struct.unpack_from("<f", header, 16)[0]
                 pitch_raw = struct.unpack_from("<f", header, 20)[0]
-                pitch_units_code = struct.unpack_from("<I", header, 36)[0]
-                pitch_units = _PITCH_UNITS_MAP.get(pitch_units_code)
+                volume_randomization = struct.unpack_from("<f", header, 28)[0]
+                volume_randomization_db = _linear_randomization_to_db(volume_randomization)
+                max_playbacks = struct.unpack_from("<I", header, 36)[0]
+                spawn_intensity = struct.unpack_from("<f", header, 140)[0]
+                spawn_intensity_randomization = struct.unpack_from("<f", header, 144)[0]
+                pitch_units_code = None
+                pitch_units = None
                 num = reader.read_u32()
                 if num > 1:
                     raise ValueError("Simple event must have only 0/1 sounddef")
@@ -494,15 +532,27 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
                         pitch_raw=pitch_raw,
                         pitch_units_code=pitch_units_code,
                         pitch_units=pitch_units,
+                        volume_raw=volume_raw,
+                        volume_randomization=volume_randomization,
+                        volume_randomization_db=volume_randomization_db,
+                        spawn_intensity=spawn_intensity,
+                        spawn_intensity_randomization=spawn_intensity_randomization,
+                        max_playbacks=max_playbacks,
                     )
                 )
                 return
             if event_type == 8:
                 name_index = reader.read_u32()
                 header = reader.read_exact(16 + 144)
+                volume_raw = struct.unpack_from("<f", header, 16)[0]
                 pitch_raw = struct.unpack_from("<f", header, 20)[0]
-                pitch_units_code = struct.unpack_from("<I", header, 36)[0]
-                pitch_units = _PITCH_UNITS_MAP.get(pitch_units_code)
+                volume_randomization = struct.unpack_from("<f", header, 28)[0]
+                volume_randomization_db = _linear_randomization_to_db(volume_randomization)
+                max_playbacks = struct.unpack_from("<I", header, 36)[0]
+                spawn_intensity = struct.unpack_from("<f", header, 140)[0]
+                spawn_intensity_randomization = struct.unpack_from("<f", header, 144)[0]
+                pitch_units_code = None
+                pitch_units = None
                 num_layers = reader.read_u32()
                 refs: list[int] = []
                 for _ in range(num_layers):
@@ -539,6 +589,12 @@ def parse_fev_event_map(path: str) -> FmodFevParsed:
                         pitch_raw=pitch_raw,
                         pitch_units_code=pitch_units_code,
                         pitch_units=pitch_units,
+                        volume_raw=volume_raw,
+                        volume_randomization=volume_randomization,
+                        volume_randomization_db=volume_randomization_db,
+                        spawn_intensity=spawn_intensity,
+                        spawn_intensity_randomization=spawn_intensity_randomization,
+                        max_playbacks=max_playbacks,
                     )
                 )
                 return

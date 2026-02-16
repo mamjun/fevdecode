@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 import uuid
@@ -241,6 +242,40 @@ def _apply_event_properties(event: ET.Element, properties: dict[str, str] | None
         node.text = value
 
 
+def _format_float(value: float) -> str:
+    if abs(value) < 1e-7:
+        return "0"
+    text = f"{value:.6f}"
+    return text.rstrip("0").rstrip(".")
+
+
+def _linear_to_db(value: float) -> float:
+    if value <= 0:
+        return -96.0
+    return 20.0 * math.log10(value)
+
+
+def _build_fev_event_properties(parsed_events: dict[str, "FmodEvent"]) -> dict[str, dict[str, str]]:
+    results: dict[str, dict[str, str]] = {}
+    for path, event in parsed_events.items():
+        props: dict[str, str] = {}
+        if isinstance(event.volume_raw, (int, float)):
+            props["volume_db"] = _format_float(_linear_to_db(float(event.volume_raw)))
+        if isinstance(event.volume_randomization_db, (int, float)):
+            props["volume_randomization"] = _format_float(float(event.volume_randomization_db))
+        elif isinstance(event.volume_randomization, (int, float)):
+            props["volume_randomization"] = _format_float(abs(_linear_to_db(float(event.volume_randomization))))
+        if isinstance(event.spawn_intensity, (int, float)):
+            props["spawn_intensity"] = _format_float(float(event.spawn_intensity))
+        if isinstance(event.spawn_intensity_randomization, (int, float)):
+            props["spawn_intensity_randomization"] = _format_float(float(event.spawn_intensity_randomization))
+        if isinstance(event.max_playbacks, int):
+            props["maxplaybacks"] = str(event.max_playbacks)
+        if props:
+            results[path] = props
+    return results
+
+
 def _build_simpleevent(
     event_name: str,
     sounddef_name: str,
@@ -452,6 +487,7 @@ def build_fdp_project_from_fev(
     parsed = parse_fev_event_map(fev_path)
     pitch_units_map: dict[str, str] = {}
     fdp_event_props: dict[str, dict] = {}
+    fev_event_props = _build_fev_event_properties(parsed.event_map)
     if pitch_units_fdp and os.path.isfile(pitch_units_fdp):
         try:
             effects = parse_fdp_event_effects(pitch_units_fdp)
@@ -595,7 +631,13 @@ def build_fdp_project_from_fev(
                 bank_name = bgm_bank
             pitch_octaves = event.pitch_raw * 4.0 if isinstance(event.pitch_raw, (int, float)) else None
             pitch_units = event.pitch_units or pitch_units_map.get(event_path)
-            event_properties = fdp_event_props.get(event_path, {}).get("properties") if fdp_event_props else None
+            event_properties: dict[str, str] = {}
+            fev_props = fev_event_props.get(event_path)
+            if fev_props:
+                event_properties.update(fev_props)
+            fdp_props = fdp_event_props.get(event_path, {}).get("properties") if fdp_event_props else None
+            if fdp_props:
+                event_properties.update(fdp_props)
             eventgroup.append(
                 _build_simpleevent(
                     event_name,
@@ -606,7 +648,7 @@ def build_fdp_project_from_fev(
                     use_loop_template,
                     pitch_octaves,
                     pitch_units,
-                    event_properties,
+                    event_properties or None,
                 )
             )
 
@@ -636,7 +678,13 @@ def build_fdp_project_from_fev(
                 bank_name = bgm_bank
             pitch_octaves = event.pitch_raw * 4.0 if isinstance(event.pitch_raw, (int, float)) else None
             pitch_units = event.pitch_units or pitch_units_map.get(event_path)
-            event_properties = fdp_event_props.get(event_path, {}).get("properties") if fdp_event_props else None
+            event_properties: dict[str, str] = {}
+            fev_props = fev_event_props.get(event_path)
+            if fev_props:
+                event_properties.update(fev_props)
+            fdp_props = fdp_event_props.get(event_path, {}).get("properties") if fdp_event_props else None
+            if fdp_props:
+                event_properties.update(fdp_props)
             eventgroup.append(
                 _build_simpleevent(
                     event_name,
@@ -647,7 +695,7 @@ def build_fdp_project_from_fev(
                     use_loop_template,
                     pitch_octaves,
                     pitch_units,
-                    event_properties,
+                    event_properties or None,
                 )
             )
 
